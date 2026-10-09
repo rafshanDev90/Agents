@@ -317,9 +317,9 @@ def handle_command(line: str) -> bool:
             "/tools              List tools\n"
             "/memory             Show saved memory\n"
             "/clear              Clear conversation history\n"
-            "/quit               Exit"
+            "/quit or /exit      Exit"
         )
-    elif cmd == "/quit":
+    elif cmd in {"/quit", "/exit"}:
         raise SystemExit
     else:
         console.print("[yellow]Unknown command. Type /help for commands.[/yellow]")
@@ -327,21 +327,24 @@ def handle_command(line: str) -> bool:
 
 
 async def main():
-    async with AsyncExitStack() as stack:
-        console.print(Panel.fit(
-            "[bold cyan]Personal Agent[/bold cyan]\n"
-            "Local models, workspace tools, MCP, and persistent memory",
-            border_style="cyan",
-        ))
-        await connect_mcp(stack)
-        console.print(
-            f"[green]Ready[/green] · model [cyan]{MODELS[model_name].model}[/cyan] "
-            f"· {len(TOOL_SCHEMAS)} tools · memory loaded"
-        )
-        console.print("Type [bold]/help[/bold] for commands, or ask a question.\n")
-        try:
+    try:
+        async with AsyncExitStack() as stack:
+            console.print(Panel.fit(
+                "[bold cyan]Personal Agent[/bold cyan]\n"
+                "Local models, workspace tools, MCP, and persistent memory",
+                border_style="cyan",
+            ))
+            await connect_mcp(stack)
+            console.print(
+                f"[green]Ready[/green] · model [cyan]{MODELS[model_name].model}[/cyan] "
+                f"· {len(TOOL_SCHEMAS)} tools · memory loaded"
+            )
+            console.print("Type [bold]/help[/bold] for commands, or ask a question.\n")
             while True:
-                line = (await asyncio.to_thread(console.input, "[bold cyan]you[/]> ")).strip()
+                line = console.input("[bold cyan]you[/]> ").strip()
+                if line.lower() in {"exit", "quit"}:
+                    console.print("\n[dim]Goodbye![/dim]")
+                    break
                 if not line or handle_command(line):
                     continue
                 with console.status(
@@ -351,8 +354,8 @@ async def main():
                     answer = await run_agent(line)
                 console.print(Panel(Markdown(answer), title="assistant", border_style="green"))
                 console.print()
-        except (EOFError, KeyboardInterrupt, SystemExit):
-            console.print("\n[dim]Goodbye![/dim]")
+    except (EOFError, KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+        console.print("\n[dim]Goodbye![/dim]")
 
 
 if __name__ == "__main__":
