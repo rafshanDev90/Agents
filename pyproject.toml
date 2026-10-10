@@ -9,4 +9,5 @@ dependencies = [
     "openai>=3.10.0",
     "pydantic>=2.13.5",
     "rich>=13.9",
+    "sympy>=1.14.0",
 ]
