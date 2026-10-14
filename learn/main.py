@@ -1,112 +1,129 @@
-import json  # Added to parse the tool arguments string
+"""Local project-notes assistant.
+
+This agent helps a small team turn natural-language requests into project notes,
+checklists, and reports, and retrieve those files later. File access is confined
+to the sandbox, while saved sessions let conversations resume after restarting.
+"""
+
 from openai import OpenAI
-from rich.console import Console  # Imported Rich Console
+from rich.console import Console
+from rich.panel import Panel
+from rich.markdown import Markdown
 
-client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
-console = Console()  # Initialized Rich Console
+from pathlib import Path
+from sandbox import SandboxedFileTools
+from session import agentSession
+from storage_engine import PersistentSessionManager
+from search_engine import SearchEngine
+import json
 
-history = [{
-    "role": "system",
-    "content": "You are a helpful assistant."
-}]
 
-def add_numbers(a: float, b: float) -> float:
-    """Adds two numbers together."""
-    return a + b
+class SeniorAgent:
+    def __init__(self):
+        self.client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
+        self.search_engine = SearchEngine()
+        self.console = Console()
+        self.file_sandbox = SandboxedFileTools()
 
-tool_schemas = [
-    {
-        "type": "function",
-        "function": {
-            "name": "add_numbers",
-            "description": "Use this tool to add two numerical numbers together.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "a": {"type": "number", "description": "The first number"},
-                    "b": {"type": "number", "description": "The second number"}
-                },
-                "required": ["a", "b"]
-            }
+        # Registry mapping function names to execution functions
+        self.available_tools = {
+            "add_numbers": self.add_numbers,
+            "write_file": self.file_sandbox.write_file,
+            "read_file": self.file_sandbox.read_file,
+            "search_web": self.search_web
         }
-    }
-]
 
-AVAILABLE_TOOLS = {
-    "add_numbers": add_numbers,
-}
+        schema_path = Path(__file__).with_name("tool_schemas.json")
+        with schema_path.open(encoding="utf-8") as schema_file:
+            self.tool_schemas = json.load(schema_file)
 
-def chat_with_model(user_input: str) -> str:
-    history.append({"role": "user", "content": user_input})
+    def add_numbers(self, a: float, b: float) -> str:
+        return str(float(a) + float(b))
 
-    # Wrap the entire LLM + Tool Execution loop in the console status animation
-    with console.status("[bold green]Agent is thinking...") as status:
-        while True:
-            response = client.chat.completions.create(
-                model="qwen3.5:4b",
-                messages=history,
-                tools=tool_schemas
-            )
-            
-            message = response.choices[0].message
-        
-            # Check if the model decided to call a tool instead of replying with text
-            if message.tool_calls:
-                # 1. Save the model's tool call intent to history
-                history.append(message) 
+    def search_web(self, query: str) -> str:
+        """Wrapper method executing safe interface operations with the SearchEngine."""
+        try:
+            result = self.search_engine.search(query)
+            return str(result)
+        except Exception as e:
+            return f"Search execution failed: {str(e)}"
 
-                for tool_call in message.tool_calls:
-                    name = tool_call.function.name
-                    
-                    # Dynamically update the spinner text to show which tool is running
-                    status.update(f"[bold yellow]Agent is running tool: {name}...")
+    def run(self, session: agentSession, user_input: str) -> str:
+        session.add_message("user", user_input)
 
-                    try:
-                        if name not in AVAILABLE_TOOLS:
-                            raise ValueError(f"Unknown tool: {name}")
-                        args = json.loads(tool_call.function.arguments or "{}")
-                        result = AVAILABLE_TOOLS[name](**args)
-                        content = str(result)
-                    except (ValueError, TypeError, json.JSONDecodeError) as error:
-                        content = f"Tool {name} failed: {error}"
-                        console.print(f"[bold red]{content}") # Styled print
-                    except Exception as error:
-                        content = f"Tool {name} failed: {error}"
-                        console.print(f"[bold red]{content}") # Styled print
+        with self.console.status("[bold green]Agent is thinking...") as status:
+            while True:
+                response = self.client.chat.completions.create(
+                    model="qwen3.5:4b",
+                    messages=session.history,
+                    tools=self.tool_schemas,
+                )
 
-                    # Return one tool result for every tool call so the model can continue.
-                    history.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": name,
-                        "content": content
-                    })
-                
-                # Reset the status text for the next LLM iteration
-                status.update("[bold green]Agent is processing tool results...")
-                continue  # Go back to the start of the loop to get the model's next response
+                message = response.choices[0].message
 
-            else:
-                history.append({"role": "assistant", "content": message.content})
-                return message.content
+                if message.tool_calls:
+                    session.add_llm_response(message)
 
+                    for tool_call in message.tool_calls:
+                        name = tool_call.function.name
+                        status.update(f"[bold yellow]Executing: {name}...")
+
+                        try:
+                            if name not in self.available_tools:
+                                raise ValueError(f"Unknown tool: {name}")
+                            args = json.loads(tool_call.function.arguments or "{}")
+                            
+                            # Execute dynamically
+                            result = self.available_tools[name](**args)
+                            content = str(result)
+                        except Exception as error:
+                            content = f"Tool failure ({name}): {error}"
+                            self.console.print(f"[bold red]{content}")
+
+                        session.add_tool_call(tool_call.id, name, content)
+
+                    status.update("[bold green]Processing changes...")
+                    continue
+
+                session.add_message("assistant", message.content or "")
+                return message.content or ""
 
 if __name__ == "__main__":
-    console.print("[bold cyan]Chat started. Type 'exit' or 'quit' to stop.[/bold cyan]")
+    from rich.markdown import Markdown  # Ensure Markdown is imported
+    
+    agent = SeniorAgent()
+    manager = PersistentSessionManager()
+    
+    # Load or initialize session
+    session_id = "user_dev_session_01"
+    session = manager.load(session_id)
+    
+    agent.console.print(f"[bold blue]Active Session: {session.session_id}[/bold blue]\n")
+    
     try:
         while True:
-            user_input = input("\nyou: ").strip()
-            if user_input.lower() in {"exit", "quit"}:
-                console.print("[bold red]Goodbye![/bold red]")
+            user_input = input("You: ")
+            if user_input.lower() in ["exit", "quit"]:
+                manager.save(session)
+                agent.console.print("[bold red]Session persisted. Goodbye![/bold red]")
                 break
-            if not user_input:
-                continue
+
+            # 1. Fetch the raw response string from the agent loop
+            response = agent.run(session, user_input)
             
-            # Get the answer (the spinner runs inside this function call)
-            response_content = chat_with_model(user_input)
+            # 2. Print a clean, professional separator prefix
+            agent.console.print("\n[bold green]Agent:[/bold green]")
             
-            # Print the final output cleanly using Rich
-            console.print(f"[bold blue]assistant:[/bold blue] {response_content}")
+            # 3. Parse the Markdown and render it beautifully through the console panel
+            beautiful_markdown = Markdown(response)
+            agent.console.print(beautiful_markdown)
             
-    except (EOFError, KeyboardInterrupt):
-        console.print("\n[bold red]Goodbye![/bold red]")
+            # Add an extra newline for clean visual breathing room in the CLI
+            agent.console.print("")
+            
+            # Auto-save checkpoint after every turn
+            manager.save(session) 
+            
+    except KeyboardInterrupt:
+        manager.save(session)
+        agent.console.print("\n[bold red]Interrupted. Session saved safely.[/bold red]")

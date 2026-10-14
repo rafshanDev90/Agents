@@ -1,0 +1,63 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "add_numbers",
+      "description": "Adds two numerical numbers.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "a": { "type": "number" },
+          "b": { "type": "number" }
+        },
+        "required": ["a", "b"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "write_file",
+      "description": "Safely saves text to a specific file inside the sandbox.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "filename": { "type": "string", "description": "e.g., data.txt" },
+          "content": { "type": "string" }
+        },
+        "required": ["filename", "content"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "description": "Reads text from a specific file within the sandbox.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "filename": { "type": "string" }
+        },
+        "required": ["filename"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_web",
+      "description": "Queries the web for up-to-date facts, research data, or programming documentation.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The natural language search query string."
+          }
+        },
+        "required": ["query"]
+      }
+    }
+  }
+]
