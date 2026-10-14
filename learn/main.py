@@ -113,7 +113,7 @@ if __name__ == "__main__":
 
     # Load or initialize the active session (SQLite-backed now)
     session = store.load("user_dev_session_01")
-    ctx = AppContext(store=store, session=session, console=agent.console)
+    ctx = AppContext(store=store, session=session, console=agent.console, agent=agent)
     dispatcher = CommandDispatcher(ctx)
 
     agent.console.print(f"[bold blue]Active Session: {ctx.session.session_id}[/bold blue]")

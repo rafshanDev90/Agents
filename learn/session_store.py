@@ -270,6 +270,41 @@ class SessionStore:
         ).fetchone()
         return row is not None
 
+    # ------------------------------------------------------------------ search
+
+    def search(self, query: str, limit: int = 25) -> List[Dict[str, Any]]:
+        """Full-text search across ALL sessions.
+
+        FTS5 (bm25-ranked) when available; plain LIKE across messages as a
+        fallback. Every word is quoted so user input can't inject FTS5
+        operators (AND/OR/NEAR/…) — a literal keyword search.
+        """
+        terms = [term for term in re.findall(r"\w+", query) if term]
+        if not terms:
+            return []
+
+        if self.fts_enabled:
+            match = " ".join(f'"{term}"' for term in terms)
+            rows = self.conn.execute(
+                "SELECT messages_fts.session_id AS session_id, messages_fts.seq AS seq,"
+                " m.role AS role, messages_fts.content AS content, s.title AS title"
+                " FROM messages_fts"
+                " JOIN messages m ON m.session_id = messages_fts.session_id"
+                " AND m.seq = messages_fts.seq"
+                " JOIN sessions s ON s.id = messages_fts.session_id"
+                " WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?",
+                (match, limit),
+            ).fetchall()
+        else:
+            conditions = " AND ".join("LOWER(m.content) LIKE ?" for _ in terms)
+            rows = self.conn.execute(
+                "SELECT m.session_id, m.seq, m.role, m.content, s.title"
+                " FROM messages m JOIN sessions s ON s.id = m.session_id"
+                f" WHERE {conditions} ORDER BY m.session_id, m.seq LIMIT ?",
+                [f"%{term.lower()}%" for term in terms] + [limit],
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     # --------------------------------------------------------- create / delete
 
     def create(self, title: str = "") -> agentSession:
