@@ -13,9 +13,12 @@ from rich.markdown import Markdown
 from pathlib import Path
 from sandbox import SandboxedFileTools
 from session import agentSession
-from storage_engine import PersistentSessionManager
+from session_store import SessionStore
+from commands import AppContext, CommandDispatcher
 from search_engine import SearchEngine
+from timing import TurnTrace
 import json
+import time
 
 
 class SeniorAgent:
@@ -24,6 +27,7 @@ class SeniorAgent:
         self.search_engine = SearchEngine()
         self.console = Console()
         self.file_sandbox = SandboxedFileTools()
+        self.last_trace = None
 
         # Registry mapping function names to execution functions
         self.available_tools = {
@@ -50,14 +54,18 @@ class SeniorAgent:
 
     def run(self, session: agentSession, user_input: str) -> str:
         session.add_message("user", user_input)
+        trace = TurnTrace()
+        self.last_trace = trace
 
         with self.console.status("[bold green]Agent is thinking...") as status:
             while True:
+                call_started = time.perf_counter()
                 response = self.client.chat.completions.create(
                     model="qwen3.5:4b",
                     messages=session.history,
                     tools=self.tool_schemas,
                 )
+                trace.record_round(time.perf_counter() - call_started, response.usage)
 
                 message = response.choices[0].message
 
@@ -72,9 +80,13 @@ class SeniorAgent:
                             if name not in self.available_tools:
                                 raise ValueError(f"Unknown tool: {name}")
                             args = json.loads(tool_call.function.arguments or "{}")
-                            
-                            # Execute dynamically
-                            result = self.available_tools[name](**args)
+
+                            # Execute dynamically, timed even if the tool raises
+                            tool_started = time.perf_counter()
+                            try:
+                                result = self.available_tools[name](**args)
+                            finally:
+                                trace.record_tool(name, time.perf_counter() - tool_started)
                             content = str(result)
                         except Exception as error:
                             content = f"Tool failure ({name}): {error}"
@@ -92,24 +104,42 @@ if __name__ == "__main__":
     from rich.markdown import Markdown  # Ensure Markdown is imported
     
     agent = SeniorAgent()
-    manager = PersistentSessionManager()
-    
-    # Load or initialize session
-    session_id = "user_dev_session_01"
-    session = manager.load(session_id)
-    
-    agent.console.print(f"[bold blue]Active Session: {session.session_id}[/bold blue]\n")
+    store = SessionStore()
+    migrated = store.import_legacy_json()
+    if migrated:
+        agent.console.print(
+            f"[dim]Imported {migrated} legacy JSON session(s) into SQLite[/dim]"
+        )
+
+    # Load or initialize the active session (SQLite-backed now)
+    session = store.load("user_dev_session_01")
+    ctx = AppContext(store=store, session=session, console=agent.console)
+    dispatcher = CommandDispatcher(ctx)
+
+    agent.console.print(f"[bold blue]Active Session: {ctx.session.session_id}[/bold blue]")
+    agent.console.print("[dim]Type /help for commands.[/dim]\n")
     
     try:
         while True:
             user_input = input("You: ")
+
+            # Slash commands run locally — they never reach the model
+            if user_input.strip().startswith("/"):
+                if dispatcher.dispatch(user_input):
+                    store.save(ctx.session)
+                    agent.console.print("[bold red]Session persisted. Goodbye![/bold red]")
+                    break
+                continue
+
             if user_input.lower() in ["exit", "quit"]:
-                manager.save(session)
+                store.save(ctx.session)
                 agent.console.print("[bold red]Session persisted. Goodbye![/bold red]")
                 break
+            if not user_input.strip():
+                continue
 
             # 1. Fetch the raw response string from the agent loop
-            response = agent.run(session, user_input)
+            response = agent.run(ctx.session, user_input)
             
             # 2. Print a clean, professional separator prefix
             agent.console.print("\n[bold green]Agent:[/bold green]")
@@ -122,8 +152,12 @@ if __name__ == "__main__":
             agent.console.print("")
             
             # Auto-save checkpoint after every turn
-            manager.save(session) 
+            save_started = time.perf_counter()
+            store.save(ctx.session)
+            if agent.last_trace is not None:
+                agent.last_trace.record_save(time.perf_counter() - save_started)
+                agent.console.print(agent.last_trace.render(), style="dim")
             
-    except KeyboardInterrupt:
-        manager.save(session)
+    except (KeyboardInterrupt, EOFError):
+        store.save(ctx.session)
         agent.console.print("\n[bold red]Interrupted. Session saved safely.[/bold red]")
