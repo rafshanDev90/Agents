@@ -14,7 +14,7 @@ from pathlib import Path
 from sandbox import SandboxedFileTools
 from session import agentSession
 from session_store import SessionStore
-from commands import AppContext, CommandDispatcher
+from commands import AppContext, CommandDispatcher, CommandCompleter, install_readline
 from search_engine import SearchEngine
 from timing import TurnTrace
 import json
@@ -111,12 +111,15 @@ if __name__ == "__main__":
             f"[dim]Imported {migrated} legacy JSON session(s) into SQLite[/dim]"
         )
 
-    # Load or initialize the active session (SQLite-backed now)
-    session = store.load("user_dev_session_01")
-    ctx = AppContext(store=store, session=session, console=agent.console, agent=agent)
+    # Every launch starts fresh; old conversations are one /session open away
+    ctx = AppContext(store=store, session=store.fresh(), console=agent.console, agent=agent)
     dispatcher = CommandDispatcher(ctx)
+    install_readline(CommandCompleter(ctx, dispatcher.command_names))
 
-    agent.console.print(f"[bold blue]Active Session: {ctx.session.session_id}[/bold blue]")
+    agent.console.print(
+        f"[bold blue]Fresh session:[/bold blue] {ctx.session.session_id}"
+        " [dim](nothing loaded — /session lists saved ones, Tab completes commands)[/dim]"
+    )
     agent.console.print("[dim]Type /help for commands.[/dim]\n")
     
     try:
@@ -126,14 +129,16 @@ if __name__ == "__main__":
             # Slash commands run locally — they never reach the model
             if user_input.strip().startswith("/"):
                 if dispatcher.dispatch(user_input):
-                    store.save(ctx.session)
-                    agent.console.print("[bold red]Session persisted. Goodbye![/bold red]")
+                    saved = ctx.save_session()
+                    farewell = "Session persisted." if saved else "Nothing to save."
+                    agent.console.print(f"[bold red]{farewell} Goodbye![/bold red]")
                     break
                 continue
 
             if user_input.lower() in ["exit", "quit"]:
-                store.save(ctx.session)
-                agent.console.print("[bold red]Session persisted. Goodbye![/bold red]")
+                saved = ctx.save_session()
+                farewell = "Session persisted." if saved else "Nothing to save."
+                agent.console.print(f"[bold red]{farewell} Goodbye![/bold red]")
                 break
             if not user_input.strip():
                 continue
@@ -153,11 +158,11 @@ if __name__ == "__main__":
             
             # Auto-save checkpoint after every turn
             save_started = time.perf_counter()
-            store.save(ctx.session)
+            ctx.save_session()
             if agent.last_trace is not None:
                 agent.last_trace.record_save(time.perf_counter() - save_started)
                 agent.console.print(agent.last_trace.render(), style="dim")
             
     except (KeyboardInterrupt, EOFError):
-        store.save(ctx.session)
+        ctx.save_session()
         agent.console.print("\n[bold red]Interrupted. Session saved safely.[/bold red]")

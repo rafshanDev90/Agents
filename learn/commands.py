@@ -40,6 +40,13 @@ class AppContext:
     agent: Any = None          # SeniorAgent — gives /timing and /tokens the live data
     should_exit: bool = False
 
+    def save_session(self) -> bool:
+        """Persist the active session — never create rows for empty drafts."""
+        if len(self.session.history) > 1:   # more than the system prompt
+            self.store.save(self.session)
+            return True
+        return False
+
 
 class CommandDispatcher:
     def __init__(self, ctx: AppContext):
@@ -140,7 +147,7 @@ class CommandDispatcher:
         self.ctx.console.print(table)
 
     def _session_new(self, title: str) -> None:
-        self.ctx.store.save(self.ctx.session)
+        self.ctx.save_session()
         self.ctx.session = self.ctx.store.create(title)
         suffix = f" — [italic]{title}[/italic]" if title else ""
         self.ctx.console.print(
@@ -151,7 +158,7 @@ class CommandDispatcher:
         matches = self._resolve_or_complain(identifier, "open")
         if matches is None:
             return
-        self.ctx.store.save(self.ctx.session)
+        self.ctx.save_session()
         self.ctx.session = self.ctx.store.load(matches[0])
         self.ctx.console.print(
             f"Resumed [cyan]{self.ctx.session.session_id}[/cyan]"
@@ -400,3 +407,73 @@ class CommandDispatcher:
 
     def _exit(self, _argument: str) -> None:
         self.ctx.should_exit = True
+
+    @property
+    def command_names(self) -> List[str]:
+        return sorted(self._handlers)
+
+
+class CommandCompleter:
+    """Tab completion for slash commands and session ids.
+
+    Completes the first word against the command list, `/session` against its
+    subcommands, and `/session open|delete` against real session ids.
+    """
+
+    SUBCOMMANDS = ["new", "open", "search", "delete", "list"]
+    RESUME_SUBCOMMANDS = {"open", "switch", "resume", "delete", "rm"}
+
+    def __init__(self, ctx: AppContext, commands: List[str]):
+        self.ctx = ctx
+        self.commands = commands
+        self._options: List[str] = []
+
+    def complete(self, text: str, state: int):
+        """readline callback — must never raise (a crash kills the prompt)."""
+        if state == 0:
+            try:
+                import readline
+
+                line = readline.get_line_buffer()
+            except Exception:
+                line = text
+            try:
+                self._options = self._compute_matches(line, text)
+            except Exception:
+                self._options = []
+        try:
+            return self._options[state]
+        except IndexError:
+            return None
+
+    def _compute_matches(self, line: str, text: str) -> List[str]:
+        if text.startswith("/"):  # completing the command word itself
+            return [name + " " for name in self.commands if name.startswith(text)]
+
+        words = line.split()
+        if not words:
+            return []
+
+        if words[0] == "/session":
+            # completing the subcommand word itself ("/session " or "/session op")
+            if len(words) == 1 or (len(words) == 2 and words[1] == text):
+                return [sub + " " for sub in self.SUBCOMMANDS if sub.startswith(text)]
+            if words[1] in self.RESUME_SUBCOMMANDS and len(words) <= 3:
+                session_ids = [record["id"] for record in self.ctx.store.list_sessions()]
+                return [sid + " " for sid in session_ids if sid.startswith(text)]
+        return []
+
+
+def install_readline(completer: CommandCompleter) -> bool:
+    """Wire tab completion + line editing (arrow-key history) into input()."""
+    try:
+        import readline
+    except ImportError:  # e.g. minimal builds — CLI still works, just no Tab
+        return False
+    readline.set_completer(completer.complete)
+    readline.set_completer_delims(" \t\n")  # keep '/' inside the completed word
+    try:
+        readline.parse_and_bind("tab: complete")
+    except Exception:
+        return False
+    return True

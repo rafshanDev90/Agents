@@ -321,6 +321,11 @@ class SessionStore:
             )
         return agentSession(session_id=session_id)
 
+    def fresh(self) -> agentSession:
+        """A fresh start: an in-memory draft session that save() persists
+        only once the draft actually contains a conversation."""
+        return agentSession(session_id=f"draft-{uuid.uuid4().hex[:4]}")
+
     def delete(self, session_id: str) -> bool:
         if not self.exists(session_id):
             return False
