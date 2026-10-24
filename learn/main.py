@@ -19,6 +19,9 @@ from search_engine import SearchEngine
 from timing import TurnTrace
 import json
 import time
+import uuid
+
+MAX_TOOL_ROUNDS = 5
 
 
 class SeniorAgent:
@@ -52,34 +55,121 @@ class SeniorAgent:
         except Exception as e:
             return f"Search execution failed: {str(e)}"
 
+    @staticmethod
+    def _iter_json_objects(text: str):
+        """Yield whole JSON objects found in text, ignoring surrounding prose."""
+        decoder = json.JSONDecoder()
+        index = 0
+        while True:
+            start = text.find("{", index)
+            if start == -1:
+                return
+            try:
+                obj, end = decoder.raw_decode(text[start:])
+            except ValueError:
+                index = start + 1
+                continue
+            if isinstance(obj, dict):
+                yield obj
+            index = start + end
+
+    def _recover_text_tool_calls(self, content: str) -> list:
+        """Rescue tool calls some models print as text instead of structured calls.
+
+        qwen2.5-coder via Ollama emits `<tool_call>{...}</tool_call>` (or bare JSON)
+        that Ollama's parser drops, leaving the call in `message.content`. We accept
+        only objects naming a known tool, so ordinary JSON answers stay answers.
+        """
+        calls = []
+        for obj in self._iter_json_objects(content or ""):
+            function = obj.get("function") if isinstance(obj.get("function"), dict) else {}
+            name = obj.get("name") or function.get("name")
+            if name not in self.available_tools:
+                continue
+            args = obj.get("arguments", function.get("arguments", obj.get("parameters")))
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    args = {}
+            if not isinstance(args, dict):
+                args = {}
+            calls.append(
+                {
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "name": name,
+                    "arguments": json.dumps(args),
+                }
+            )
+        return calls
+
     def run(self, session: agentSession, user_input: str) -> str:
         session.add_message("user", user_input)
         trace = TurnTrace()
         self.last_trace = trace
 
+        rounds = 0
         with self.console.status("[bold green]Agent is thinking...") as status:
             while True:
+                if rounds > MAX_TOOL_ROUNDS:
+                    notice = (
+                        f"Stopped after {MAX_TOOL_ROUNDS} tool rounds to avoid "
+                        "running indefinitely. Please narrow the request and try again."
+                    )
+                    session.add_message("assistant", notice)
+                    return notice
+
                 call_started = time.perf_counter()
                 response = self.client.chat.completions.create(
-                    model="qwen3.5:4b",
+                    model="qwen3:8b",
                     messages=session.history,
                     tools=self.tool_schemas,
                 )
                 trace.record_round(time.perf_counter() - call_started, response.usage)
 
                 message = response.choices[0].message
+                content = message.content or ""
 
                 if message.tool_calls:
                     session.add_llm_response(message)
+                    calls = [
+                        {
+                            "id": tool_call.id,
+                            "name": tool_call.function.name,
+                            "arguments": tool_call.function.arguments,
+                        }
+                        for tool_call in message.tool_calls
+                    ]
+                else:
+                    calls = self._recover_text_tool_calls(content)
+                    if calls:
+                        session.add_llm_response(
+                            {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": call["id"],
+                                        "type": "function",
+                                        "function": {
+                                            "name": call["name"],
+                                            "arguments": call["arguments"],
+                                        },
+                                    }
+                                    for call in calls
+                                ],
+                            }
+                        )
 
-                    for tool_call in message.tool_calls:
-                        name = tool_call.function.name
+                if calls:
+                    for call in calls:
+                        name = call["name"]
                         status.update(f"[bold yellow]Executing: {name}...")
 
                         try:
                             if name not in self.available_tools:
                                 raise ValueError(f"Unknown tool: {name}")
-                            args = json.loads(tool_call.function.arguments or "{}")
+                            args = json.loads(call["arguments"] or "{}")
 
                             # Execute dynamically, timed even if the tool raises
                             tool_started = time.perf_counter()
@@ -87,18 +177,19 @@ class SeniorAgent:
                                 result = self.available_tools[name](**args)
                             finally:
                                 trace.record_tool(name, time.perf_counter() - tool_started)
-                            content = str(result)
+                            tool_result = str(result)
                         except Exception as error:
-                            content = f"Tool failure ({name}): {error}"
-                            self.console.print(f"[bold red]{content}")
+                            tool_result = f"Tool failure ({name}): {error}"
+                            self.console.print(f"[bold red]{tool_result}")
 
-                        session.add_tool_call(tool_call.id, name, content)
+                        session.add_tool_call(call["id"], name, tool_result)
 
+                    rounds += 1
                     status.update("[bold green]Processing changes...")
                     continue
 
-                session.add_message("assistant", message.content or "")
-                return message.content or ""
+                session.add_message("assistant", content)
+                return content
 
 if __name__ == "__main__":
     from rich.markdown import Markdown  # Ensure Markdown is imported
